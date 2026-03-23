@@ -2,18 +2,11 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import Image from "next/image";
+import { Conversation } from "@11labs/client";
 import { useLocale } from "@/lib/locale-context";
 import { translations } from "@/lib/i18n";
 
 type TranscriptEntry = { speaker: "caller" | "agent"; text: string; timestamp: string };
-type Message = { role: "user" | "assistant"; content: string };
-
-// BCP-47 lang tags - en-GB gives better UK English recognition
-const SPEECH_LANG: Record<string, string> = { en: "en-GB", nl: "nl-NL", es: "es-ES" };
-
-// Voice selection: grace = US, amy = UK
-// Default to amy (UK) since x20ai is a UK company
-const TTS_VOICE = "amy";
 
 function getTimestamp() {
   const now = new Date();
@@ -49,40 +42,26 @@ function Waveform({ active, size = "sm" }: { active: boolean; size?: "sm" | "lg"
   );
 }
 
-function hasSpeechSupport() {
-  if (typeof window === "undefined") return false;
-  return "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
-}
-
 export default function VoiceDemo() {
   const { locale } = useLocale();
   const t = translations[locale].voice;
 
   const [status, setStatus] = useState<"idle" | "ringing" | "connected" | "ended">("idle");
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
-  const [currentSpeaker, setCurrentSpeaker] = useState<"caller" | "agent" | null>(null);
   const [callDuration, setCallDuration] = useState(0);
-  const [isListening, setIsListening] = useState(false);
-  const [isThinking, setIsThinking] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [interimText, setInterimText] = useState("");
-  const [speechSupported] = useState(hasSpeechSupport);
-  const [micError, setMicError] = useState<string | null>(null);
+  const [agentMode, setAgentMode] = useState<"listening" | "speaking">("listening");
+  const [error, setError] = useState<string | null>(null);
 
   const transcriptRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const historyRef = useRef<Message[]>([]);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const conversationRef = useRef<Conversation | null>(null);
   const statusRef = useRef(status);
-  const isSpeakingRef = useRef(false);
 
   useEffect(() => { statusRef.current = status; }, [status]);
-  useEffect(() => { isSpeakingRef.current = isSpeaking; }, [isSpeaking]);
 
   useEffect(() => {
     if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
-  }, [transcript, currentSpeaker]);
+  }, [transcript]);
 
   useEffect(() => {
     if (status === "connected") {
@@ -91,285 +70,89 @@ export default function VoiceDemo() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [status]);
 
-  const stopAudio = useCallback(() => {
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.src = "";
-      audioRef.current = null;
-    }
-    setIsSpeaking(false);
-    isSpeakingRef.current = false;
-  }, []);
-
-  const stopListening = useCallback(() => {
-    if (recognitionRef.current) {
-      recognitionRef.current.abort();
-      recognitionRef.current = null;
-    }
-    setIsListening(false);
-    setInterimText("");
-  }, []);
-
-  // Speak text via ElevenLabs, fallback to Web Speech
-  const speakText = useCallback(async (text: string, onEnd?: () => void) => {
-    stopAudio();
-    setIsSpeaking(true);
-    isSpeakingRef.current = true;
-
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, locale, voice: TTS_VOICE }),
-      });
-
-      if (!res.ok) throw new Error("TTS API unavailable");
-
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      audioRef.current = audio;
-
-      audio.onended = () => {
-        URL.revokeObjectURL(url);
-        audioRef.current = null;
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        onEnd?.();
-      };
-
-      audio.onerror = () => {
-        URL.revokeObjectURL(url);
-        audioRef.current = null;
-        setIsSpeaking(false);
-        isSpeakingRef.current = false;
-        onEnd?.();
-      };
-
-      await audio.play();
-    } catch {
-      // Fallback to Web Speech Synthesis
-      setIsSpeaking(false);
-      isSpeakingRef.current = false;
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = SPEECH_LANG[locale] ?? "en-GB";
-        utterance.rate = 1.0;
-        utterance.onend = () => onEnd?.();
-        utterance.onerror = () => onEnd?.();
-        window.speechSynthesis.speak(utterance);
-      } else {
-        onEnd?.();
-      }
-    }
-  }, [locale, stopAudio]);
-
   const addToTranscript = useCallback((speaker: "caller" | "agent", text: string) => {
-    setTranscript((prev) => [...prev, { speaker, text, timestamp: getTimestamp() }]);
+    if (!text.trim()) return;
+    setTranscript((prev) => [...prev, { speaker, text: text.trim(), timestamp: getTimestamp() }]);
   }, []);
 
-  // Forward declaration - defined below but referenced in sendToAI
-  const startListeningCycleRef = useRef<() => void>(() => {});
-
-  const sendToAI = useCallback(async (userMessage: string) => {
-    setCurrentSpeaker("agent");
-    setIsThinking(true);
-    addToTranscript("caller", userMessage);
-    historyRef.current.push({ role: "user", content: userMessage });
-
-    try {
-      const res = await fetch("/api/voice-chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage, history: historyRef.current.slice(-10), locale }),
-      });
-
-      if (!res.ok) throw new Error("API error");
-      const data = await res.json();
-      const reply: string = data.reply ?? "Sorry, I didn't catch that.";
-
-      historyRef.current.push({ role: "assistant", content: reply });
-      setIsThinking(false);
-      addToTranscript("agent", reply);
-
-      speakText(reply, () => {
-        setCurrentSpeaker(null);
-        if (statusRef.current === "connected") startListeningCycleRef.current();
-      });
-    } catch {
-      setIsThinking(false);
-      setCurrentSpeaker(null);
-      const errMsg = locale === "nl" ? "Sorry, er is iets misgegaan." : locale === "es" ? "Lo siento, algo salió mal." : "Sorry, something went wrong.";
-      addToTranscript("agent", errMsg);
-      speakText(errMsg, () => {
-        if (statusRef.current === "connected") startListeningCycleRef.current();
-      });
-    }
-  }, [locale, addToTranscript, speakText]);
-
-  const startListeningCycle = useCallback(() => {
-    if (statusRef.current !== "connected") return;
-    if (!speechSupported) return;
-
-    const SpeechRecognitionCtor =
-      (window as unknown as { SpeechRecognition?: typeof SpeechRecognition; webkitSpeechRecognition?: typeof SpeechRecognition })
-        .SpeechRecognition ??
-      (window as unknown as { webkitSpeechRecognition?: typeof SpeechRecognition })
-        .webkitSpeechRecognition;
-
-    if (!SpeechRecognitionCtor) return;
-
-    const rec = new SpeechRecognitionCtor();
-    // continuous=true + maxAlternatives=3 gives the best transcription accuracy.
-    // We collect interim results and commit when Chrome fires a final result.
-    rec.continuous = true;
-    rec.interimResults = true;
-    rec.maxAlternatives = 3;
-    rec.lang = SPEECH_LANG[locale] ?? "en-GB";
-    recognitionRef.current = rec;
-
-    let committed = false;
-    let silenceTimer: ReturnType<typeof setTimeout> | null = null;
-    let accumulated = ""; // build up final text across multiple result events
-
-    const commit = (text: string) => {
-      if (committed || !text.trim()) return;
-      committed = true;
-      if (silenceTimer) clearTimeout(silenceTimer);
-      setInterimText("");
-      setIsListening(false);
-      setCurrentSpeaker(null);
-      try { rec.stop(); } catch { /* ignore */ }
-      recognitionRef.current = null;
-      sendToAI(text.trim());
-    };
-
-    rec.onstart = () => {
-      setIsListening(true);
-      setCurrentSpeaker("caller");
-    };
-
-    rec.onresult = (event: SpeechRecognitionEvent) => {
-      if (committed) return;
-
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const r = event.results[i];
-        // Pick the best alternative (highest confidence)
-        const best = Array.from({ length: r.length }, (_, j) => r[j])
-          .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0];
-        if (r.isFinal) {
-          accumulated += (accumulated ? " " : "") + best.transcript;
-        } else {
-          interim = best.transcript;
-        }
-      }
-
-      if (accumulated) {
-        setInterimText(accumulated + (interim ? " " + interim : ""));
-        // Auto-commit after 1.2s silence following a final result
-        if (silenceTimer) clearTimeout(silenceTimer);
-        silenceTimer = setTimeout(() => commit(accumulated), 1200);
-      } else {
-        setInterimText(interim);
-      }
-    };
-
-    rec.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (event.error === "no-speech") {
-        setIsListening(false);
-        setCurrentSpeaker(null);
-        setInterimText("");
-        if (statusRef.current === "connected") setTimeout(() => startListeningCycleRef.current(), 300);
-      } else if (event.error === "not-allowed") {
-        setMicError("Microphone access denied. Please allow microphone access and try again.");
-        setIsListening(false);
-        setCurrentSpeaker(null);
-      } else {
-        setIsListening(false);
-        setCurrentSpeaker(null);
-        setInterimText("");
-        if (statusRef.current === "connected" && !committed) {
-          setTimeout(() => startListeningCycleRef.current(), 500);
-        }
-      }
-    };
-
-    rec.onend = () => {
-      if (silenceTimer) clearTimeout(silenceTimer);
-      setIsListening(false);
-      // If we got a final result but no commit yet (edge case), commit now
-      if (accumulated && !committed) commit(accumulated);
-    };
-
-    try { rec.start(); } catch { /* ignore duplicate start */ }
-  }, [locale, speechSupported, sendToAI]);
-
-  // Keep the ref in sync so speakText callback can call it
-  useEffect(() => { startListeningCycleRef.current = startListeningCycle; }, [startListeningCycle]);
-
-  const startCall = () => {
+  const startCall = useCallback(async () => {
     setStatus("ringing");
     setTranscript([]);
     setCallDuration(0);
-    historyRef.current = [];
-    setMicError(null);
+    setError(null);
 
-    setTimeout(() => {
-      setStatus("connected");
+    try {
+      // Get a signed URL from our backend (keeps API key off the client)
+      const res = await fetch("/api/voice-token");
+      if (!res.ok) throw new Error("Failed to get conversation token");
+      const { signedUrl } = await res.json();
 
-      const greeting =
-        locale === "nl"
-          ? "Hey, met Eva van X Twenty AI, hoe kan ik je helpen?"
-          : locale === "es"
-          ? "Hey, soy Eva de X Twenty AI, ¿en qué te puedo ayudar?"
-          : "Hey, Eva here from X Twenty AI — how can I help you today?";
-
-      setCurrentSpeaker("agent");
-      addToTranscript("agent", greeting);
-      historyRef.current.push({ role: "assistant", content: greeting });
-
-      speakText(greeting, () => {
-        setCurrentSpeaker(null);
-        startListeningCycleRef.current();
+      const conversation = await Conversation.startSession({
+        signedUrl,
+        onConnect: () => {
+          setStatus("connected");
+        },
+        onDisconnect: () => {
+          if (statusRef.current !== "ended") {
+            setStatus("ended");
+          }
+          if (timerRef.current) clearInterval(timerRef.current);
+        },
+        onError: (message: string) => {
+          console.error("Conversation error:", message);
+          setError(message || "Connection error occurred");
+          setStatus("ended");
+        },
+        onModeChange: ({ mode }: { mode: "listening" | "speaking" }) => {
+          setAgentMode(mode);
+        },
+        onMessage: ({ message, source }: { message: string; source: "ai" | "user" }) => {
+          if (source === "ai") {
+            addToTranscript("agent", message);
+          } else if (source === "user") {
+            addToTranscript("caller", message);
+          }
+        },
       });
-    }, 2500);
-  };
 
-  const endCall = () => {
-    stopListening();
-    stopAudio();
-    if (typeof window !== "undefined" && window.speechSynthesis) window.speechSynthesis.cancel();
+      conversationRef.current = conversation;
+    } catch (err) {
+      console.error("Failed to start conversation:", err);
+      const msg = err instanceof Error ? err.message : "Failed to connect";
+      setError(msg);
+      setStatus("idle");
+    }
+  }, [addToTranscript]);
+
+  const endCall = useCallback(async () => {
     setStatus("ended");
-    setCurrentSpeaker(null);
-    setIsThinking(false);
-    setInterimText("");
     if (timerRef.current) clearInterval(timerRef.current);
-  };
+    if (conversationRef.current) {
+      try { await conversationRef.current.endSession(); } catch { /* ignore */ }
+      conversationRef.current = null;
+    }
+  }, []);
 
-  const resetCall = () => {
-    stopListening();
-    stopAudio();
-    if (typeof window !== "undefined" && window.speechSynthesis) window.speechSynthesis.cancel();
+  const resetCall = useCallback(() => {
     setStatus("idle");
     setTranscript([]);
     setCallDuration(0);
-    setCurrentSpeaker(null);
-    setIsThinking(false);
-    setInterimText("");
-    historyRef.current = [];
-    setMicError(null);
-  };
+    setAgentMode("listening");
+    setError(null);
+  }, []);
 
   useEffect(() => {
     return () => {
-      stopListening();
-      stopAudio();
-      if (typeof window !== "undefined" && window.speechSynthesis) window.speechSynthesis.cancel();
       if (timerRef.current) clearInterval(timerRef.current);
+      if (conversationRef.current) {
+        conversationRef.current.endSession().catch(() => {});
+        conversationRef.current = null;
+      }
     };
-  }, [stopListening, stopAudio]);
+  }, []);
+
+  const isAgentSpeaking = status === "connected" && agentMode === "speaking";
+  const isListening = status === "connected" && agentMode === "listening";
 
   return (
     <div className="min-h-screen py-8 px-4">
@@ -381,11 +164,6 @@ export default function VoiceDemo() {
           </div>
           <h1 className="text-3xl sm:text-4xl font-bold mb-2 text-foreground">{t.pageTitle}</h1>
           <p className="text-muted-foreground">{t.subtitle}</p>
-          {!speechSupported && (
-            <p className="mt-2 text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-full px-3 py-1 inline-block">
-              {locale === "nl" ? "Gebruik Chrome of Edge voor spraakinvoer" : locale === "es" ? "Usa Chrome o Edge para entrada de voz" : "Use Chrome or Edge for voice input"}
-            </p>
-          )}
         </div>
 
         <div className="grid lg:grid-cols-2 gap-6">
@@ -421,6 +199,9 @@ export default function VoiceDemo() {
                   <p className="text-xs text-muted-foreground mb-6 opacity-70">
                     {locale === "nl" ? "Echte stem-AI - spreek gewoon" : locale === "es" ? "IA de voz real - habla naturalmente" : "Real voice AI - just speak naturally"}
                   </p>
+                  {error && (
+                    <p className="text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-2 mb-4">{error}</p>
+                  )}
                   <button onClick={startCall} className="px-8 py-3 rounded-full bg-success hover:bg-success/90 text-white font-semibold transition-all duration-200 flex items-center gap-2 mx-auto">
                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" />
@@ -446,43 +227,27 @@ export default function VoiceDemo() {
 
               {status === "connected" && (
                 <div className="w-full text-center">
-                  <Waveform active={isSpeaking || isListening} size="lg" />
-                  <div className="mt-6 mb-4">
-                    {isThinking ? (
-                      <p className="text-sm text-primary animate-pulse">
-                        {locale === "nl" ? "AI denkt na..." : locale === "es" ? "IA pensando..." : "AI thinking..."}
-                      </p>
-                    ) : isSpeaking ? (
+                  <Waveform active={isAgentSpeaking || isListening} size="lg" />
+                  <div className="mt-6 mb-6">
+                    {isAgentSpeaking ? (
                       <p className="text-sm text-primary animate-pulse">{t.agentSpeaking}</p>
-                    ) : isListening ? (
-                      <p className="text-sm text-success animate-pulse">{t.callerSpeaking}</p>
                     ) : (
-                      <p className="text-sm text-muted-foreground">{t.listening}</p>
-                    )}
-                    {interimText && (
-                      <p className="text-xs text-muted-foreground mt-1 italic">&ldquo;{interimText}&rdquo;</p>
+                      <p className="text-sm text-success animate-pulse">{t.callerSpeaking}</p>
                     )}
                   </div>
 
-                  {micError && (
-                    <p className="text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-2 mb-4">{micError}</p>
-                  )}
+                  <div className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full mb-6 transition-all ${
+                    isListening ? "bg-success/10 text-success border border-success/20" : "bg-primary/10 text-primary border border-primary/20"
+                  }`}>
+                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
+                    </svg>
+                    {isListening
+                      ? (locale === "nl" ? "Luistert..." : locale === "es" ? "Escuchando..." : "Listening...")
+                      : (locale === "nl" ? "Eva spreekt..." : locale === "es" ? "Eva hablando..." : "Eva speaking...")}
+                  </div>
 
-                  {speechSupported && (
-                    <div className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full mb-4 transition-all ${
-                      isListening ? "bg-success/10 text-success border border-success/20" : "bg-secondary text-muted-foreground"
-                    }`}>
-                      <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>
-                      </svg>
-                      {isListening
-                        ? (locale === "nl" ? "Luistert..." : locale === "es" ? "Escuchando..." : "Listening...")
-                        : isSpeaking
-                        ? (locale === "nl" ? "AI spreekt..." : locale === "es" ? "IA hablando..." : "AI speaking...")
-                        : (locale === "nl" ? "Microfoon gereed" : locale === "es" ? "Micrófono listo" : "Mic ready")}
-                    </div>
-                  )}
-
+                  <br />
                   <button onClick={endCall} className="px-8 py-3 rounded-full bg-destructive hover:bg-destructive/90 text-white font-semibold transition-all duration-200">
                     {t.endCall}
                   </button>
@@ -498,6 +263,9 @@ export default function VoiceDemo() {
                   </div>
                   <p className="text-lg font-medium text-foreground mb-1">{t.callComplete}</p>
                   <p className="text-sm text-muted-foreground mb-6">{t.duration}: {formatTime(callDuration)}</p>
+                  {error && (
+                    <p className="text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-2 mb-4">{error}</p>
+                  )}
                   <button onClick={resetCall} className="px-6 py-2.5 rounded-full border border-border hover:border-primary text-sm font-medium text-foreground transition-all duration-200">
                     {t.newCall}
                   </button>
@@ -530,6 +298,11 @@ export default function VoiceDemo() {
               {transcript.length === 0 && status === "ringing" && (
                 <div className="flex items-center justify-center h-full text-muted-foreground text-sm animate-pulse">{t.connecting}...</div>
               )}
+              {transcript.length === 0 && status === "connected" && (
+                <div className="flex items-center justify-center h-full text-muted-foreground text-sm animate-pulse">
+                  {locale === "nl" ? "Wacht op transcriptie..." : locale === "es" ? "Esperando transcripción..." : "Waiting for transcript..."}
+                </div>
+              )}
               {transcript.map((entry, i) => (
                 <div key={i} className={`flex gap-3 ${entry.speaker === "agent" ? "animate-slide-in-left" : "animate-slide-in-right"}`}>
                   <div className={`w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold ${
@@ -546,26 +319,6 @@ export default function VoiceDemo() {
                   </div>
                 </div>
               ))}
-
-              {interimText && (
-                <div className="flex gap-3 animate-slide-in-right opacity-60">
-                  <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold bg-secondary text-muted-foreground">C</div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-muted-foreground leading-relaxed italic">{interimText}...</p>
-                  </div>
-                </div>
-              )}
-
-              {(isThinking || (isSpeaking && !isThinking)) && !interimText && (
-                <div className="flex gap-3 animate-slide-in-left">
-                  <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold bg-gradient-to-br from-[hsl(var(--primary))] to-[hsl(var(--accent))] text-white">AI</div>
-                  <div className="flex items-center gap-1 pt-2">
-                    {[0, 1, 2].map((dot) => (
-                      <div key={dot} className="w-2 h-2 rounded-full bg-primary" style={{ animation: `typing-dot 1.2s ease-in-out ${dot * 0.2}s infinite` }} />
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
 
             {(status === "connected" || status === "ended") && (
