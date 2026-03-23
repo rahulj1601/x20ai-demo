@@ -8,7 +8,12 @@ import { translations } from "@/lib/i18n";
 type TranscriptEntry = { speaker: "caller" | "agent"; text: string; timestamp: string };
 type Message = { role: "user" | "assistant"; content: string };
 
+// BCP-47 lang tags - en-GB gives better UK English recognition
 const SPEECH_LANG: Record<string, string> = { en: "en-GB", nl: "nl-NL", es: "es-ES" };
+
+// Voice selection: grace = US, amy = UK
+// Default to amy (UK) since x20ai is a UK company
+const TTS_VOICE = "amy";
 
 function getTimestamp() {
   const now = new Date();
@@ -115,7 +120,7 @@ export default function VoiceDemo() {
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, locale }),
+        body: JSON.stringify({ text, locale, voice: TTS_VOICE }),
       });
 
       if (!res.ok) throw new Error("TTS API unavailable");
@@ -216,12 +221,29 @@ export default function VoiceDemo() {
     if (!SpeechRecognitionCtor) return;
 
     const rec = new SpeechRecognitionCtor();
-    rec.continuous = false;
+    // continuous=true + maxAlternatives=3 gives the best transcription accuracy.
+    // We collect interim results and commit when Chrome fires a final result.
+    rec.continuous = true;
     rec.interimResults = true;
+    rec.maxAlternatives = 3;
     rec.lang = SPEECH_LANG[locale] ?? "en-GB";
     recognitionRef.current = rec;
 
-    let finalSent = false;
+    let committed = false;
+    let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+    let accumulated = ""; // build up final text across multiple result events
+
+    const commit = (text: string) => {
+      if (committed || !text.trim()) return;
+      committed = true;
+      if (silenceTimer) clearTimeout(silenceTimer);
+      setInterimText("");
+      setIsListening(false);
+      setCurrentSpeaker(null);
+      try { rec.stop(); } catch { /* ignore */ }
+      recognitionRef.current = null;
+      sendToAI(text.trim());
+    };
 
     rec.onstart = () => {
       setIsListening(true);
@@ -229,21 +251,28 @@ export default function VoiceDemo() {
     };
 
     rec.onresult = (event: SpeechRecognitionEvent) => {
+      if (committed) return;
+
       let interim = "";
-      let final = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const r = event.results[i];
-        if (r.isFinal) final += r[0].transcript;
-        else interim += r[0].transcript;
+        // Pick the best alternative (highest confidence)
+        const best = Array.from({ length: r.length }, (_, j) => r[j])
+          .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0];
+        if (r.isFinal) {
+          accumulated += (accumulated ? " " : "") + best.transcript;
+        } else {
+          interim = best.transcript;
+        }
       }
-      setInterimText(interim);
-      if (final.trim() && !finalSent) {
-        finalSent = true;
-        setInterimText("");
-        setIsListening(false);
-        setCurrentSpeaker(null);
-        recognitionRef.current = null;
-        sendToAI(final.trim());
+
+      if (accumulated) {
+        setInterimText(accumulated + (interim ? " " + interim : ""));
+        // Auto-commit after 1.2s silence following a final result
+        if (silenceTimer) clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => commit(accumulated), 1200);
+      } else {
+        setInterimText(interim);
       }
     };
 
@@ -261,10 +290,18 @@ export default function VoiceDemo() {
         setIsListening(false);
         setCurrentSpeaker(null);
         setInterimText("");
+        if (statusRef.current === "connected" && !committed) {
+          setTimeout(() => startListeningCycleRef.current(), 500);
+        }
       }
     };
 
-    rec.onend = () => { setIsListening(false); };
+    rec.onend = () => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      setIsListening(false);
+      // If we got a final result but no commit yet (edge case), commit now
+      if (accumulated && !committed) commit(accumulated);
+    };
 
     try { rec.start(); } catch { /* ignore duplicate start */ }
   }, [locale, speechSupported, sendToAI]);
