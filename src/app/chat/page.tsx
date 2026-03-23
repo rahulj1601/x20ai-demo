@@ -13,9 +13,17 @@ type Message = {
   text: string;
   time: string;
   status?: "sent" | "delivered" | "read";
+  attachment?: { name: string; mimeType: string; preview?: string };
 };
 
 type HistoryEntry = { role: "user" | "assistant"; content: string };
+
+type Attachment = {
+  base64: string;
+  mimeType: string;
+  name: string;
+  preview?: string; // data URL for images
+};
 
 function TypingIndicator() {
   return (
@@ -70,9 +78,11 @@ export default function ChatDemo() {
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>(t.suggestions.slice(0, 3));
+  const [attachment, setAttachment] = useState<Attachment | null>(null);
   const historyRef = useRef<HistoryEntry[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Reset on locale change
   useEffect(() => {
@@ -89,33 +99,86 @@ export default function ChatDemo() {
 
   useEffect(() => { scrollToBottom(); }, [messages, isTyping, scrollToBottom]);
 
-  const sendMessage = useCallback(async (text: string) => {
-    if (!text.trim() || isTyping) return;
+  const handleFileSelect = useCallback(async (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      const base64 = dataUrl.split(",")[1];
+      const isImage = file.type.startsWith("image/");
+      setAttachment({
+        base64,
+        mimeType: file.type,
+        name: file.name,
+        preview: isImage ? dataUrl : undefined,
+      });
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const sendMessage = useCallback(async (text: string, pendingAttachment?: Attachment | null) => {
+    const currentAttachment = pendingAttachment ?? attachment;
+    if (!text.trim() && !currentAttachment) return;
+    if (isTyping) return;
+
+    // Resolve file content for non-image files
+    let fileContent: string | undefined;
+    if (currentAttachment && !currentAttachment.mimeType.startsWith("image/")) {
+      try {
+        const res = await fetch("/api/extract-file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ base64: currentAttachment.base64, mimeType: currentAttachment.mimeType, fileName: currentAttachment.name }),
+        });
+        const data = await res.json();
+        fileContent = data.text ?? "";
+      } catch {
+        fileContent = "";
+      }
+    }
+
+    const displayText = text.trim() || (currentAttachment ? currentAttachment.name : "");
 
     const userMsg: Message = {
       id: Date.now().toString(),
       sender: "user",
-      text: text.trim(),
+      text: displayText,
       time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       status: "sent",
+      attachment: currentAttachment ? { name: currentAttachment.name, mimeType: currentAttachment.mimeType, preview: currentAttachment.preview } : undefined,
     };
 
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
-    setSuggestions([]); // Clear while responding
+    setAttachment(null);
+    setSuggestions([]);
     setIsTyping(true);
 
-    // Simulate read receipts
     setTimeout(() => setMessages((prev) => prev.map((m) => m.id === userMsg.id ? { ...m, status: "delivered" } : m)), 400);
     setTimeout(() => setMessages((prev) => prev.map((m) => m.id === userMsg.id ? { ...m, status: "read" } : m)), 900);
 
-    historyRef.current.push({ role: "user", content: text.trim() });
+    historyRef.current.push({ role: "user", content: displayText });
 
     try {
+      const body: Record<string, unknown> = {
+        message: text.trim(),
+        history: historyRef.current.slice(-8),
+        locale,
+      };
+
+      if (currentAttachment) {
+        if (currentAttachment.mimeType.startsWith("image/")) {
+          body.fileContent = currentAttachment.base64;
+        } else {
+          body.fileContent = fileContent;
+        }
+        body.fileName = currentAttachment.name;
+        body.fileType = currentAttachment.mimeType;
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text.trim(), history: historyRef.current.slice(-8), locale }),
+        body: JSON.stringify(body),
       });
 
       const data = await res.json();
@@ -132,7 +195,6 @@ export default function ChatDemo() {
         time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
       }]);
 
-      // Always show fresh suggestions after AI responds
       setTimeout(() => setSuggestions(newSuggestions), 300);
     } catch {
       setIsTyping(false);
@@ -145,7 +207,7 @@ export default function ChatDemo() {
       }]);
       setSuggestions(t.suggestions.slice(0, 3));
     }
-  }, [isTyping, locale, t.suggestions]);
+  }, [isTyping, locale, t.suggestions, attachment]);
 
   return (
     <div className="min-h-screen py-8 px-4">
@@ -184,11 +246,26 @@ export default function ChatDemo() {
                       ? "bg-primary text-primary-foreground rounded-br-sm"
                       : "bg-secondary text-foreground rounded-bl-sm"
                   }`}>
-                    {msg.sender === "agent" ? (
+                    {msg.attachment && (
+                      <div className="mb-2">
+                        {msg.attachment.preview ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={msg.attachment.preview} alt={msg.attachment.name} className="rounded-lg max-h-40 max-w-full object-cover" />
+                        ) : (
+                          <div className="flex items-center gap-2 bg-white/10 rounded-lg px-3 py-2">
+                            <svg className="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                            </svg>
+                            <span className="text-xs truncate max-w-[160px]">{msg.attachment.name}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {msg.text && (msg.sender === "agent" ? (
                       <AgentMessage text={msg.text} />
                     ) : (
                       <p className="text-sm leading-relaxed">{msg.text}</p>
-                    )}
+                    ))}
                     <div className={`flex items-center gap-1 mt-1 ${msg.sender === "user" ? "justify-end" : ""}`}>
                       <span className="text-[10px] opacity-60">{msg.time}</span>
                       {msg.sender === "user" && msg.status && (
@@ -210,7 +287,7 @@ export default function ChatDemo() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Suggestions - always shown when available */}
+            {/* Suggestions */}
             {suggestions.length > 0 && !isTyping && (
               <div className="px-5 py-2.5 border-t border-border/50 flex gap-2 overflow-x-auto flex-shrink-0 scrollbar-hide">
                 {suggestions.map((s, i) => (
@@ -226,11 +303,59 @@ export default function ChatDemo() {
               </div>
             )}
 
+            {/* Attachment preview */}
+            {attachment && (
+              <div className="px-5 pt-2 flex-shrink-0">
+                <div className="inline-flex items-center gap-2 bg-secondary rounded-xl px-3 py-2 max-w-[240px]">
+                  {attachment.preview ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={attachment.preview} alt={attachment.name} className="w-8 h-8 rounded object-cover flex-shrink-0" />
+                  ) : (
+                    <svg className="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  )}
+                  <span className="text-xs text-foreground truncate flex-1">{attachment.name}</span>
+                  <button
+                    onClick={() => setAttachment(null)}
+                    className="text-muted-foreground hover:text-foreground flex-shrink-0 ml-1"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Input */}
             <form
               onSubmit={(e) => { e.preventDefault(); sendMessage(input); }}
-              className="px-5 py-3 border-t border-border flex items-center gap-3 flex-shrink-0"
+              className="px-5 py-3 border-t border-border flex items-center gap-2 flex-shrink-0"
             >
+              {/* Hidden file input */}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/csv"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleFileSelect(file);
+                  e.target.value = "";
+                }}
+              />
+              {/* Attach button */}
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isTyping}
+                className="w-9 h-9 rounded-full hover:bg-secondary flex items-center justify-center transition-all disabled:opacity-30 text-muted-foreground hover:text-foreground flex-shrink-0"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                </svg>
+              </button>
               <input
                 ref={inputRef}
                 type="text"
@@ -242,8 +367,8 @@ export default function ChatDemo() {
               />
               <button
                 type="submit"
-                disabled={!input.trim() || isTyping}
-                className="w-10 h-10 rounded-full bg-primary hover:bg-primary/90 disabled:opacity-30 flex items-center justify-center transition-all"
+                disabled={(!input.trim() && !attachment) || isTyping}
+                className="w-10 h-10 rounded-full bg-primary hover:bg-primary/90 disabled:opacity-30 flex items-center justify-center transition-all flex-shrink-0"
               >
                 <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
