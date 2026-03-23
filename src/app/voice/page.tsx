@@ -321,10 +321,10 @@ export default function VoiceDemo() {
 
       const greeting =
         locale === "nl"
-          ? "Hallo! U spreekt met de AI-assistent van x20ai. Hoe kan ik u vandaag helpen?"
+          ? "Hey, met Eva van X Twenty AI, hoe kan ik je helpen?"
           : locale === "es"
-          ? "¡Hola! Habla con el asistente de IA de x20ai. ¿En qué puedo ayudarle hoy?"
-          : "Hello! You've reached the x20ai AI assistant. How can I help you today?";
+          ? "Hey, soy Eva de X Twenty AI, ¿en qué te puedo ayudar?"
+          : "Hey, Eva here from X Twenty AI — how can I help you today?";
 
       setCurrentSpeaker("agent");
       addToTranscript("agent", greeting);
