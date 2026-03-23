@@ -8,7 +8,6 @@ import { translations } from "@/lib/i18n";
 type TranscriptEntry = { speaker: "caller" | "agent"; text: string; timestamp: string };
 type Message = { role: "user" | "assistant"; content: string };
 
-// Locale -> BCP 47 lang tag for speech recognition
 const SPEECH_LANG: Record<string, string> = { en: "en-GB", nl: "nl-NL", es: "es-ES" };
 
 function getTimestamp() {
@@ -24,7 +23,6 @@ function formatTime(seconds: number): string {
 
 function Waveform({ active, size = "sm" }: { active: boolean; size?: "sm" | "lg" }) {
   const barCount = size === "lg" ? 40 : 24;
-  // Use stable seeds per bar - avoid Math.random() on render
   const seeds = useRef(
     Array.from({ length: 40 }, () => ({ dur: 0.4 + Math.random() * 0.6, delay: Math.random() * 0.5 }))
   );
@@ -46,7 +44,6 @@ function Waveform({ active, size = "sm" }: { active: boolean; size?: "sm" | "lg"
   );
 }
 
-// Check Web Speech API support
 function hasSpeechSupport() {
   if (typeof window === "undefined") return false;
   return "SpeechRecognition" in window || "webkitSpeechRecognition" in window;
@@ -62,6 +59,7 @@ export default function VoiceDemo() {
   const [callDuration, setCallDuration] = useState(0);
   const [isListening, setIsListening] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [interimText, setInterimText] = useState("");
   const [speechSupported] = useState(hasSpeechSupport);
   const [micError, setMicError] = useState<string | null>(null);
@@ -70,17 +68,17 @@ export default function VoiceDemo() {
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const historyRef = useRef<Message[]>([]);
-  const synthRef = useRef<SpeechSynthesis | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const statusRef = useRef(status);
+  const isSpeakingRef = useRef(false);
 
   useEffect(() => { statusRef.current = status; }, [status]);
+  useEffect(() => { isSpeakingRef.current = isSpeaking; }, [isSpeaking]);
 
-  // Scroll to bottom when transcript updates
   useEffect(() => {
     if (transcriptRef.current) transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
   }, [transcript, currentSpeaker]);
 
-  // Call timer
   useEffect(() => {
     if (status === "connected") {
       timerRef.current = setInterval(() => setCallDuration((d) => d + 1), 1000);
@@ -88,47 +86,90 @@ export default function VoiceDemo() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [status]);
 
-  // Init speech synthesis
-  useEffect(() => {
-    if (typeof window !== "undefined") synthRef.current = window.speechSynthesis;
+  const stopAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.src = "";
+      audioRef.current = null;
+    }
+    setIsSpeaking(false);
+    isSpeakingRef.current = false;
   }, []);
 
   const stopListening = useCallback(() => {
     if (recognitionRef.current) {
-      recognitionRef.current.stop();
+      recognitionRef.current.abort();
       recognitionRef.current = null;
     }
     setIsListening(false);
     setInterimText("");
   }, []);
 
-  const speakText = useCallback((text: string, onEnd?: () => void) => {
-    if (!synthRef.current) { onEnd?.(); return; }
-    synthRef.current.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = SPEECH_LANG[locale] ?? "en-GB";
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    // Try to pick a natural voice
-    const voices = synthRef.current.getVoices();
-    const preferred = voices.find(
-      (v) => v.lang.startsWith(locale === "nl" ? "nl" : locale === "es" ? "es" : "en") && !v.name.includes("Google")
-    ) ?? voices.find((v) => v.lang.startsWith(locale === "nl" ? "nl" : locale === "es" ? "es" : "en"));
-    if (preferred) utterance.voice = preferred;
-    utterance.onend = () => onEnd?.();
-    utterance.onerror = () => onEnd?.();
-    synthRef.current.speak(utterance);
-  }, [locale]);
+  // Speak text via ElevenLabs, fallback to Web Speech
+  const speakText = useCallback(async (text: string, onEnd?: () => void) => {
+    stopAudio();
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, locale }),
+      });
+
+      if (!res.ok) throw new Error("TTS API unavailable");
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        audioRef.current = null;
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        onEnd?.();
+      };
+
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        audioRef.current = null;
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        onEnd?.();
+      };
+
+      await audio.play();
+    } catch {
+      // Fallback to Web Speech Synthesis
+      setIsSpeaking(false);
+      isSpeakingRef.current = false;
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = SPEECH_LANG[locale] ?? "en-GB";
+        utterance.rate = 1.0;
+        utterance.onend = () => onEnd?.();
+        utterance.onerror = () => onEnd?.();
+        window.speechSynthesis.speak(utterance);
+      } else {
+        onEnd?.();
+      }
+    }
+  }, [locale, stopAudio]);
 
   const addToTranscript = useCallback((speaker: "caller" | "agent", text: string) => {
     setTranscript((prev) => [...prev, { speaker, text, timestamp: getTimestamp() }]);
   }, []);
 
+  // Forward declaration - defined below but referenced in sendToAI
+  const startListeningCycleRef = useRef<() => void>(() => {});
+
   const sendToAI = useCallback(async (userMessage: string) => {
     setCurrentSpeaker("agent");
     setIsThinking(true);
-
-    // Add user message to transcript
     addToTranscript("caller", userMessage);
     historyRef.current.push({ role: "user", content: userMessage });
 
@@ -136,11 +177,7 @@ export default function VoiceDemo() {
       const res = await fetch("/api/voice-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userMessage,
-          history: historyRef.current.slice(-10),
-          locale,
-        }),
+        body: JSON.stringify({ message: userMessage, history: historyRef.current.slice(-10), locale }),
       });
 
       if (!res.ok) throw new Error("API error");
@@ -151,13 +188,9 @@ export default function VoiceDemo() {
       setIsThinking(false);
       addToTranscript("agent", reply);
 
-      // Speak the reply
       speakText(reply, () => {
         setCurrentSpeaker(null);
-        // Resume listening if still connected
-        if (statusRef.current === "connected") {
-          startListeningCycle();
-        }
+        if (statusRef.current === "connected") startListeningCycleRef.current();
       });
     } catch {
       setIsThinking(false);
@@ -165,10 +198,9 @@ export default function VoiceDemo() {
       const errMsg = locale === "nl" ? "Sorry, er is iets misgegaan." : locale === "es" ? "Lo siento, algo salió mal." : "Sorry, something went wrong.";
       addToTranscript("agent", errMsg);
       speakText(errMsg, () => {
-        if (statusRef.current === "connected") startListeningCycle();
+        if (statusRef.current === "connected") startListeningCycleRef.current();
       });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locale, addToTranscript, speakText]);
 
   const startListeningCycle = useCallback(() => {
@@ -189,6 +221,8 @@ export default function VoiceDemo() {
     rec.lang = SPEECH_LANG[locale] ?? "en-GB";
     recognitionRef.current = rec;
 
+    let finalSent = false;
+
     rec.onstart = () => {
       setIsListening(true);
       setCurrentSpeaker("caller");
@@ -198,12 +232,13 @@ export default function VoiceDemo() {
       let interim = "";
       let final = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        const res = event.results[i];
-        if (res.isFinal) final += res[0].transcript;
-        else interim += res[0].transcript;
+        const r = event.results[i];
+        if (r.isFinal) final += r[0].transcript;
+        else interim += r[0].transcript;
       }
       setInterimText(interim);
-      if (final.trim()) {
+      if (final.trim() && !finalSent) {
+        finalSent = true;
         setInterimText("");
         setIsListening(false);
         setCurrentSpeaker(null);
@@ -214,13 +249,10 @@ export default function VoiceDemo() {
 
     rec.onerror = (event: SpeechRecognitionErrorEvent) => {
       if (event.error === "no-speech") {
-        // Silently restart on no-speech
         setIsListening(false);
         setCurrentSpeaker(null);
         setInterimText("");
-        if (statusRef.current === "connected") {
-          setTimeout(() => startListeningCycle(), 500);
-        }
+        if (statusRef.current === "connected") setTimeout(() => startListeningCycleRef.current(), 300);
       } else if (event.error === "not-allowed") {
         setMicError("Microphone access denied. Please allow microphone access and try again.");
         setIsListening(false);
@@ -232,19 +264,15 @@ export default function VoiceDemo() {
       }
     };
 
-    rec.onend = () => {
-      // If no final result was sent and still connected, restart
-      if (statusRef.current === "connected" && !isThinking) {
-        // Small delay to avoid rapid restart
-      }
-      setIsListening(false);
-    };
+    rec.onend = () => { setIsListening(false); };
 
-    try { rec.start(); } catch { /* ignore */ }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    try { rec.start(); } catch { /* ignore duplicate start */ }
   }, [locale, speechSupported, sendToAI]);
 
-  const startCall = async () => {
+  // Keep the ref in sync so speakText callback can call it
+  useEffect(() => { startListeningCycleRef.current = startListeningCycle; }, [startListeningCycle]);
+
+  const startCall = () => {
     setStatus("ringing");
     setTranscript([]);
     setCallDuration(0);
@@ -254,7 +282,6 @@ export default function VoiceDemo() {
     setTimeout(() => {
       setStatus("connected");
 
-      // Greeting from AI
       const greeting =
         locale === "nl"
           ? "Hallo! U spreekt met de AI-assistent van x20ai. Hoe kan ik u vandaag helpen?"
@@ -268,14 +295,15 @@ export default function VoiceDemo() {
 
       speakText(greeting, () => {
         setCurrentSpeaker(null);
-        startListeningCycle();
+        startListeningCycleRef.current();
       });
     }, 2500);
   };
 
   const endCall = () => {
     stopListening();
-    if (synthRef.current) synthRef.current.cancel();
+    stopAudio();
+    if (typeof window !== "undefined" && window.speechSynthesis) window.speechSynthesis.cancel();
     setStatus("ended");
     setCurrentSpeaker(null);
     setIsThinking(false);
@@ -285,7 +313,8 @@ export default function VoiceDemo() {
 
   const resetCall = () => {
     stopListening();
-    if (synthRef.current) synthRef.current.cancel();
+    stopAudio();
+    if (typeof window !== "undefined" && window.speechSynthesis) window.speechSynthesis.cancel();
     setStatus("idle");
     setTranscript([]);
     setCallDuration(0);
@@ -296,14 +325,14 @@ export default function VoiceDemo() {
     setMicError(null);
   };
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopListening();
-      if (synthRef.current) synthRef.current.cancel();
+      stopAudio();
+      if (typeof window !== "undefined" && window.speechSynthesis) window.speechSynthesis.cancel();
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [stopListening]);
+  }, [stopListening, stopAudio]);
 
   return (
     <div className="min-h-screen py-8 px-4">
@@ -351,17 +380,10 @@ export default function VoiceDemo() {
                   <div className="w-24 h-24 rounded-full border-2 border-border flex items-center justify-center mx-auto mb-6">
                     <Image src="/x20ai-logo.png" alt="x20ai" width={48} height={48} className="rounded-full" />
                   </div>
-                  <p className="text-muted-foreground mb-2">{t.pressButtonToStart}</p>
-                  {speechSupported && (
-                    <p className="text-xs text-muted-foreground mb-6">
-                      {locale === "nl" ? "Spreek met de AI - echte stemherkenning" : locale === "es" ? "Habla con la IA - reconocimiento de voz real" : "Speak with the AI - real voice recognition"}
-                    </p>
-                  )}
-                  {!speechSupported && (
-                    <p className="text-xs text-muted-foreground mb-6">
-                      {locale === "nl" ? "Simulatiemodus - geen microfoon vereist" : locale === "es" ? "Modo simulación - sin micrófono requerido" : "Simulation mode - no microphone required"}
-                    </p>
-                  )}
+                  <p className="text-muted-foreground mb-1">{t.pressButtonToStart}</p>
+                  <p className="text-xs text-muted-foreground mb-6 opacity-70">
+                    {locale === "nl" ? "Echte stem-AI - spreek gewoon" : locale === "es" ? "IA de voz real - habla naturalmente" : "Real voice AI - just speak naturally"}
+                  </p>
                   <button onClick={startCall} className="px-8 py-3 rounded-full bg-success hover:bg-success/90 text-white font-semibold transition-all duration-200 flex items-center gap-2 mx-auto">
                     <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                       <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z" />
@@ -387,13 +409,13 @@ export default function VoiceDemo() {
 
               {status === "connected" && (
                 <div className="w-full text-center">
-                  <Waveform active={currentSpeaker !== null || isListening} size="lg" />
+                  <Waveform active={isSpeaking || isListening} size="lg" />
                   <div className="mt-6 mb-4">
                     {isThinking ? (
                       <p className="text-sm text-primary animate-pulse">
                         {locale === "nl" ? "AI denkt na..." : locale === "es" ? "IA pensando..." : "AI thinking..."}
                       </p>
-                    ) : currentSpeaker === "agent" ? (
+                    ) : isSpeaking ? (
                       <p className="text-sm text-primary animate-pulse">{t.agentSpeaking}</p>
                     ) : isListening ? (
                       <p className="text-sm text-success animate-pulse">{t.callerSpeaking}</p>
@@ -409,9 +431,8 @@ export default function VoiceDemo() {
                     <p className="text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-2 mb-4">{micError}</p>
                   )}
 
-                  {/* Mic indicator */}
                   {speechSupported && (
-                    <div className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full mb-4 ${
+                    <div className={`inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full mb-4 transition-all ${
                       isListening ? "bg-success/10 text-success border border-success/20" : "bg-secondary text-muted-foreground"
                     }`}>
                       <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
@@ -419,6 +440,8 @@ export default function VoiceDemo() {
                       </svg>
                       {isListening
                         ? (locale === "nl" ? "Luistert..." : locale === "es" ? "Escuchando..." : "Listening...")
+                        : isSpeaking
+                        ? (locale === "nl" ? "AI spreekt..." : locale === "es" ? "IA hablando..." : "AI speaking...")
                         : (locale === "nl" ? "Microfoon gereed" : locale === "es" ? "Micrófono listo" : "Mic ready")}
                     </div>
                   )}
@@ -487,7 +510,6 @@ export default function VoiceDemo() {
                 </div>
               ))}
 
-              {/* Interim speech bubble */}
               {interimText && (
                 <div className="flex gap-3 animate-slide-in-right opacity-60">
                   <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold bg-secondary text-muted-foreground">C</div>
@@ -497,8 +519,7 @@ export default function VoiceDemo() {
                 </div>
               )}
 
-              {/* Thinking / speaking indicator */}
-              {(isThinking || (currentSpeaker === "agent" && !isThinking)) && !interimText && (
+              {(isThinking || (isSpeaking && !isThinking)) && !interimText && (
                 <div className="flex gap-3 animate-slide-in-left">
                   <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xs font-bold bg-gradient-to-br from-[hsl(var(--primary))] to-[hsl(var(--accent))] text-white">AI</div>
                   <div className="flex items-center gap-1 pt-2">
