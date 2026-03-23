@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// ElevenLabs voice IDs - professional sounding agents
-const VOICE_IDS: Record<string, string> = {
-  en: "21m00Tcm4TlvDq8ikWAM", // Rachel - clear, professional American female
-  nl: "21m00Tcm4TlvDq8ikWAM", // Same voice, multilingual model handles Dutch
-  es: "21m00Tcm4TlvDq8ikWAM", // Same voice, multilingual model handles Spanish
-};
+// ElevenLabs voice IDs
+// aria (9BWtsMINqrJLrRacOk9x) - expressive, warm American female - excellent for multilingual
+const VOICE_ID = "9BWtsMINqrJLrRacOk9x"; // Aria
 
-// eleven_flash_v2_5 = fastest (~75ms), great for real-time voice demos
-// eleven_multilingual_v2 = highest quality, multilingual
+// eleven_flash_v2_5: lowest latency (~75ms), multilingual, sounds incredibly human
+// This is the best model for real-time voice - fast AND high quality
 const MODEL_ID = "eleven_flash_v2_5";
 
 export async function POST(req: NextRequest) {
@@ -23,8 +20,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Text required" }, { status: 400 });
     }
 
-    const voiceId = VOICE_IDS[locale] ?? VOICE_IDS.en;
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`;
 
     const response = await fetch(url, {
       method: "POST",
@@ -37,9 +33,9 @@ export async function POST(req: NextRequest) {
         text,
         model_id: MODEL_ID,
         voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-          style: 0.0,
+          stability: 0.4,       // slightly lower = more expressive
+          similarity_boost: 0.8, // high clarity
+          style: 0.2,           // slight style boost for natural warmth
           use_speaker_boost: true,
         },
       }),
