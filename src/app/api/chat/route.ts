@@ -99,23 +99,44 @@ export async function POST(req: NextRequest) {
 
     // Build message with file context for VPS proxy
     let enrichedMessage = message || "";
+    let systemPrompt: string | undefined;
 
     // Knowledge base context (accumulated uploaded docs)
     if (fileContext) {
       const contextBlock = fileContext.length > 30000 ? fileContext.slice(0, 30000) + "\n...[truncated]" : fileContext;
-      enrichedMessage = `[Documents uploaded by user:]\n\n${contextBlock}\n\n[User question:]\n${enrichedMessage || "Please summarise these documents and tell me how x20ai could help."}`;
+      enrichedMessage = enrichedMessage || "Please summarise these documents.";
+
+      systemPrompt = `You are an intelligent document assistant. The user has uploaded documents and is asking questions about them. Answer based ONLY on the document content provided below. If the answer is not in the documents, say so.
+
+Your response format (REQUIRED - return valid JSON only, no markdown code blocks):
+{"reply":"your response here in markdown format","suggestions":["question 1","question 2","question 3"]}
+
+Rules:
+- reply: Use markdown formatting. Keep responses helpful and concise. Max 300 words.
+- suggestions: Always provide exactly 3 relevant follow-up questions about the documents. Keep them short (under 10 words each).
+- Never break the JSON format. Escape any quotes inside strings properly.
+- Match the user's language (English/Dutch/Spanish).
+- Ground all answers in the uploaded documents. Cite specific sections when possible.
+
+--- UPLOADED DOCUMENTS ---
+
+${contextBlock}
+
+--- END DOCUMENTS ---`;
     } else if (fileContent && !fileType?.startsWith("image/")) {
-      // Single file attachment (legacy path)
       const truncated = fileContent.length > 4000 ? fileContent.slice(0, 4000) + "\n...[truncated]" : fileContent;
       enrichedMessage = `[Attached file: ${fileName}]\n\n${truncated}\n\n${message || "Please summarise this document and tell me how x20ai could help."}`;
     } else if (fileContent && fileType?.startsWith("image/") && !OAUTH_TOKEN) {
       enrichedMessage = `[User attached an image: ${fileName}] ${message || ""}`;
     }
 
+    const vpsBody: Record<string, unknown> = { message: enrichedMessage, history, locale };
+    if (systemPrompt) vpsBody.systemPrompt = systemPrompt;
+
     const response = await fetch(`${VPS_ENDPOINT}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${VPS_SECRET}` },
-      body: JSON.stringify({ message: enrichedMessage, history, locale }),
+      body: JSON.stringify(vpsBody),
     });
 
     if (!response.ok) {
