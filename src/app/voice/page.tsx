@@ -122,7 +122,7 @@ export default function VoiceDemo() {
       setError(msg);
       setStatus("idle");
     }
-  }, [addToTranscript]);
+  }, [addToTranscript, locale]);
 
   const endCall = useCallback(async () => {
     setStatus("ended");
