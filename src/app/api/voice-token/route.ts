@@ -1,16 +1,24 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-const AGENT_ID = process.env.ELEVENLABS_AGENT_ID || "agent_2701kmcgqbqve5bahqabmpf4tf7q";
+const AGENT_IDS: Record<string, string> = {
+  en: process.env.ELEVENLABS_AGENT_ID_EN || "agent_2701kmcgqbqve5bahqabmpf4tf7q",
+  es: process.env.ELEVENLABS_AGENT_ID_ES || "agent_0101kmchv5n0egrays6354fx7j37",
+  nl: process.env.ELEVENLABS_AGENT_ID_NL || "agent_0501kmchvpddetpty0ejw00wy315",
+};
+
 const API_KEY = process.env.ELEVENLABS_API_KEY || "";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   if (!API_KEY) {
     return NextResponse.json({ error: "ElevenLabs API key not configured" }, { status: 503 });
   }
 
+  const locale = req.nextUrl.searchParams.get("locale") || "en";
+  const agentId = AGENT_IDS[locale] ?? AGENT_IDS.en;
+
   try {
     const response = await fetch(
-      `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${AGENT_ID}`,
+      `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${agentId}`,
       { headers: { "xi-api-key": API_KEY } }
     );
 

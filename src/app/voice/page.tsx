@@ -83,7 +83,7 @@ export default function VoiceDemo() {
 
     try {
       // Get a signed URL from our backend (keeps API key off the client)
-      const res = await fetch("/api/voice-token");
+      const res = await fetch(`/api/voice-token?locale=${locale}`);
       if (!res.ok) throw new Error("Failed to get conversation token");
       const { signedUrl } = await res.json();
 
