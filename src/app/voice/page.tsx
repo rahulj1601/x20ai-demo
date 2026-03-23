@@ -82,6 +82,22 @@ export default function VoiceDemo() {
     setError(null);
 
     try {
+      // Explicitly request mic permission before connecting — surfaces denial early
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((t) => t.stop());
+      } catch {
+        setError(
+          locale === "nl"
+            ? "Microfoon toegang geweigerd. Sta toegang toe in browserinstellingen."
+            : locale === "es"
+            ? "Acceso al micrófono denegado. Permítelo en la configuración del navegador."
+            : "Microphone access denied. Please allow microphone access in your browser settings."
+        );
+        setStatus("idle");
+        return;
+      }
+
       // Get a signed URL from our backend (keeps API key off the client)
       const res = await fetch(`/api/voice-token?locale=${locale}`);
       if (!res.ok) throw new Error("Failed to get conversation token");
