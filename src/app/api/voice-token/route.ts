@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const AGENT_IDS: Record<string, string> = {
-  en: process.env.ELEVENLABS_AGENT_ID_EN || "agent_2701kmcgqbqve5bahqabmpf4tf7q",
-  es: process.env.ELEVENLABS_AGENT_ID_ES || "agent_0101kmchv5n0egrays6354fx7j37",
-  nl: process.env.ELEVENLABS_AGENT_ID_NL || "agent_0501kmchvpddetpty0ejw00wy315",
+  en: process.env.ELEVENLABS_AGENT_ID_EN || "agent_9101kmjydpqkfc0trczsqpx67cj3",
+  es: process.env.ELEVENLABS_AGENT_ID_ES || "agent_5501kmjyeedtfgyrbbm9jscst5gb",
+  nl: process.env.ELEVENLABS_AGENT_ID_NL || "agent_6601kmjye2p3es7sypdxbp5bck0m",
 };
 
 const API_KEY = process.env.ELEVENLABS_API_KEY || "";
